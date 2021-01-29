@@ -38,10 +38,9 @@
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <android/hardware/boot/1.0/IBootControl.h>
 #include <cutils/properties.h> /* for property_list */
 #include <fs_mgr/roots.h>
-#include <hardware/boot_control.h>
-#include <hardware/hardware.h>
 #include <volume_manager/VolumeManager.h>
 #include <ziparchive/zip_archive.h>
 
@@ -64,6 +63,10 @@
 #include "recovery_utils/roots.h"
 #include "volclient.h"
 
+using android::sp;
+using android::hardware::boot::V1_0::IBootControl;
+using android::hardware::boot::V1_0::CommandResult;
+using android::hardware::boot::V1_0::Slot;
 using android::volmgr::VolumeManager;
 using android::volmgr::VolumeInfo;
 
@@ -202,28 +205,22 @@ std::string get_chosen_slot(Device* device) {
 
 int set_slot(Device* device) {
   std::string slot = get_chosen_slot(device);
-  if (slot == "")
-    return 0;
-  const hw_module_t *hw_module;
-  boot_control_module_t *module;
-  int ret;
-  ret = hw_get_module("bootctrl", &hw_module);
-  if (ret != 0) {
+  CommandResult ret;
+  auto cb = [&ret](CommandResult result) { ret = result; };
+  Slot sslot = (slot == "A") ? 0 : 1;
+  sp<IBootControl> module = IBootControl::getService();
+  if (!module) {
     device->GetUI()->Print("Error getting bootctrl module.\n");
   } else {
-    module = (boot_control_module_t*) hw_module;
-    module->init(module);
-    int slot_number = 0;
-    if (slot == "B")
-      slot_number = 1;
-    if (module->setActiveBootSlot(module, slot_number))
-      device->GetUI()->Print("Error changing bootloader boot slot to %s", slot.c_str());
-    else {
+      auto result = module->setActiveBootSlot(sslot, cb);
+    if (result.isOk() && ret.success) {
       device->GetUI()->Print("Switched slot to %s.\n", slot.c_str());
       device->GoHome();
+    } else {
+      device->GetUI()->Print("Error changing bootloader boot slot to %s", slot.c_str());
     }
   }
-  return ret;
+  return ret.success ? 0 : 1;
 }
 
 bool ask_to_continue_spl_downgrade(Device* device) {
