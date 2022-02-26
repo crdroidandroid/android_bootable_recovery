@@ -638,13 +638,14 @@ static InstallResult VerifyAndInstallPackage(Package* package, bool* wipe_cache,
   ui->SetProgressType(RecoveryUI::DETERMINATE);
   ui->ShowProgress(VERIFICATION_PROGRESS_FRACTION, VERIFICATION_PROGRESS_TIME);
 
-  // Verify package.
+  /*
   if (!verify_package(package, ui)) {
     log_buffer->push_back(android::base::StringPrintf("error: %d", kZipVerificationFailure));
     if (!ui->IsTextVisible() || !ask_to_continue_unverified(ui->GetDevice())) {
         return INSTALL_CORRUPT;
     }
   }
+   */
 
   // Verify and install the contents of the package.
   ui->Print("Installing update...\n");
