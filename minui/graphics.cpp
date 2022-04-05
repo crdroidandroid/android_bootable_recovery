@@ -392,16 +392,8 @@ int gr_init() {
   gr_backend = backend.release();
 
   int overscan_percent = android::base::GetIntProperty("ro.minui.overscan_percent", 0);
-  int overscan_percent_x = android::base::GetIntProperty("ro.minui.horizontal_overscan_percent", 0);
-  int overscan_percent_y = android::base::GetIntProperty("ro.minui.vertical_overscan_percent", 0);
-
-  if (overscan_percent_x || overscan_percent_y) {
-    overscan_offset_x = gr_draw->width * overscan_percent_x / 100;
-    overscan_offset_y = gr_draw->height * overscan_percent_y / 100;
-  } else {
-    overscan_offset_x = gr_draw->width * overscan_percent / 100;
-    overscan_offset_y = gr_draw->height * overscan_percent / 100;
-  }
+  overscan_offset_x = gr_draw->width * overscan_percent / 100;
+  overscan_offset_y = gr_draw->height * overscan_percent / 100;
 
   gr_flip();
   gr_flip();
@@ -447,6 +439,24 @@ int gr_fb_height() {
   return (rotation == GRRotation::LEFT || rotation == GRRotation::RIGHT)
              ? gr_draw->width - 2 * overscan_offset_x
              : gr_draw->height - 2 * overscan_offset_y;
+}
+
+int gr_fb_width_real() {
+  return (rotation == GRRotation::LEFT || rotation == GRRotation::RIGHT) ? gr_draw->height
+                                                                         : gr_draw->width;
+}
+
+int gr_fb_height_real() {
+  return (rotation == GRRotation::LEFT || rotation == GRRotation::RIGHT) ? gr_draw->width
+                                                                         : gr_draw->height;
+}
+
+int gr_overscan_offset_x() {
+  return overscan_offset_x;
+}
+
+int gr_overscan_offset_y() {
+  return overscan_offset_y;
 }
 
 void gr_fb_blank(bool blank) {
