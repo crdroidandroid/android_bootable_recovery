@@ -53,6 +53,11 @@ cc_defaults {
     header_libs: [
         "libgtest_prod_headers",
     ],
+
+    lto: {
+        never: true,
+    },
+
 }
 
 cc_defaults {
@@ -82,6 +87,11 @@ cc_defaults {
         "libext2_e2p",
         "libext2fs",
     ],
+
+    lto: {
+        never: true,
+    },
+
 }
 
 cc_library_static {
