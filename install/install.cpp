@@ -46,6 +46,7 @@
 #include <android-base/strings.h>
 #include <android-base/unique_fd.h>
 
+#include "bootloader_message/bootloader_message.h"
 #include "install/snapshot_utils.h"
 #include "install/spl_check.h"
 #include "install/wipe_data.h"
@@ -383,10 +384,17 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
     LOG(WARNING) << "This is SPL downgrade";
   }
 
+  const auto reboot_to_recovery = [] {
+    if (std::string err; !clear_bootloader_message(&err)) {
+      LOG(ERROR) << "Failed to clear BCB message: " << err;
+    }
+    Reboot("recovery");
+  };
+
   static bool ab_package_installed = false;
   if (ab_package_installed) {
     if (ask_to_ab_reboot(device)) {
-      Reboot("userrequested,recovery,ui");
+      reboot_to_recovery();
     }
     return INSTALL_ERROR;
   }
@@ -579,7 +587,7 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
     ab_package_installed = true;
     PerformPowerwashIfRequired(zip, device);
     if (ask_to_ab_reboot(device)) {
-      Reboot("userrequested,recovery,ui");
+      reboot_to_recovery();
     }
   }
 
