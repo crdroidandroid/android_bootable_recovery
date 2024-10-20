@@ -197,17 +197,6 @@ static bool CheckAbSpecificMetadata(const std::map<std::string, std::string>& me
       undeclared_downgrade = true;
     }
   }
-  const auto post_build = get_value(metadata, "post-build");
-  const auto build_fingerprint = android::base::Tokenize(post_build, "/");
-  if (!build_fingerprint.empty() && android::base::GetProperty("ro.build.type", "") == "user") {
-    const auto& post_build_tag = build_fingerprint.back();
-    const auto build_tag = android::base::GetProperty("ro.build.tags", "");
-    if (build_tag != post_build_tag) {
-      LOG(ERROR) << "Post build-tag " << post_build_tag << " does not match device build tag "
-                 << build_tag;
-      return false;
-    }
-  }
 
   if (!spl_downgrade_approved && undeclared_downgrade &&
       !(ui->IsTextVisible() && ask_to_continue_downgrade(ui->GetDevice()))) {
