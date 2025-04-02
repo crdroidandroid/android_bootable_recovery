@@ -32,12 +32,15 @@
 #include <string>
 #include <vector>
 
+#include <aidl/android/hardware/boot/IBootControl.h>
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
 #include <android-base/properties.h>
 #include <android-base/stringprintf.h>
 #include <android-base/strings.h>
+#include <android/binder_ibinder.h>
+#include <android/binder_manager.h>
 #include <android/hardware/boot/1.0/IBootControl.h>
 #include <cutils/properties.h> /* for property_list */
 #include <fs_mgr/roots.h>
@@ -210,7 +213,24 @@ int set_slot(Device* device) {
   Slot sslot = (slot == "A") ? 0 : 1;
   sp<IBootControl> module = IBootControl::getService();
   if (!module) {
-    device->GetUI()->Print("Error getting bootctrl module.\n");
+    const auto instance_name = std::string(
+        ::aidl::android::hardware::boot::IBootControl::descriptor) + "/default";
+    if (AServiceManager_isDeclared(instance_name.c_str())) {
+      auto amodule = ::aidl::android::hardware::boot::IBootControl::fromBinder(
+          ndk::SpAIBinder(AServiceManager_waitForService(instance_name.c_str())));
+      if (amodule == nullptr) {
+        device->GetUI()->Print("AIDL bootctrl module is declared but returned nullptr.\n");
+      } else {
+        auto result = amodule->setActiveBootSlot(sslot);
+        if (result.isOk()) {
+          device->GetUI()->Print("Switched slot to %s.\n", slot.c_str());
+        } else {
+          device->GetUI()->Print("Error changing bootloader boot slot to %s", slot.c_str());
+        }
+      }
+    } else {
+      device->GetUI()->Print("Error getting bootctrl module.\n");
+    }
   } else {
       auto result = module->setActiveBootSlot(sslot, cb);
     if (result.isOk() && ret.success) {
