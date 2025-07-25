@@ -76,6 +76,10 @@ using android::volmgr::VolumeInfo;
 static constexpr const char* COMMAND_FILE = "/cache/recovery/command";
 static constexpr const char* LAST_KMSG_FILE = "/cache/recovery/last_kmsg";
 static constexpr const char* LAST_LOG_FILE = "/cache/recovery/last_log";
+static constexpr const char* LAST_CONSOLE_FILE = "/sys/fs/pstore/console-ramoops-0";
+static constexpr const char* ALT_LAST_CONSOLE_FILE = "/sys/fs/pstore/console-ramoops";
+static constexpr const char* LAST_DMESG_FILE = "/sys/fs/pstore/dmesg-ramoops-0";
+static constexpr const char* ALT_LAST_DMESG_FILE = "/sys/fs/pstore/dmesg-ramoops";
 static constexpr const char* LOCALE_FILE = "/cache/recovery/last_locale";
 
 static constexpr const char* CACHE_ROOT = "/cache";
@@ -409,13 +413,23 @@ static void choose_recovery_file(Device* device) {
       // Add LAST_KMSG_FILE + LAST_KMSG_FILE.x
       add_to_entries(LAST_KMSG_FILE);
     }
-  } else {
+  } else if (access(Paths::Get().temporary_log_file().c_str(), R_OK) != -1) {
     // If cache partition is not found, view /tmp/recovery.log instead.
-    if (access(Paths::Get().temporary_log_file().c_str(), R_OK) == -1) {
-      return;
-    } else {
-      entries.push_back(Paths::Get().temporary_log_file());
-    }
+    entries.push_back(Paths::Get().temporary_log_file());
+  }
+
+  // Add pstore logs
+  if (access(LAST_CONSOLE_FILE, R_OK) != -1) {
+    entries.push_back(LAST_CONSOLE_FILE);
+  }
+  if (access(ALT_LAST_CONSOLE_FILE, R_OK) != -1) {
+    entries.push_back(ALT_LAST_CONSOLE_FILE);
+  }
+  if (access(LAST_DMESG_FILE, R_OK) != -1) {
+    entries.push_back(LAST_DMESG_FILE);
+  }
+  if (access(ALT_LAST_DMESG_FILE, R_OK) != -1) {
+    entries.push_back(ALT_LAST_DMESG_FILE);
   }
 
   entries.push_back("Back");
