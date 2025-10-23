@@ -424,7 +424,7 @@ static InstallResult TryUpdateBinary(Package* package, bool* wipe_cache,
 
   bool spl_downgrade_approved = false;
   const auto allow_spl_downgrade =
-      android::base::GetBoolProperty("persist.vendor.recovery_allow_spl_downgrade", false);
+      android::base::GetBoolProperty("persist.vendor.recovery_allow_spl_downgrade", true);
   const auto current_spl = android::base::GetProperty("ro.build.version.security_patch", "");
   if (ViolatesSPLDowngrade(zip, current_spl)) {
     if (!allow_spl_downgrade || !ui->IsTextVisible()) {
