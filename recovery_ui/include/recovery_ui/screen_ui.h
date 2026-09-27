@@ -503,6 +503,10 @@ class ScreenRecoveryUI : public RecoveryUI, public DrawInterface {
   // true when both graphics pages are the same (except for the progress bar).
   bool pagesIdentical;
 
+  // Set when the screen no longer matches what has been drawn. The progress
+  // thread coalesces these into at most one redraw per frame.
+  bool screen_dirty_;
+
   size_t text_cols_, text_rows_;
 
   // Log text overlay, displayed when a magic key is pressed.

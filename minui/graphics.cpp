@@ -39,8 +39,20 @@ static int overscan_offset_y = 0;
 
 static uint32_t gr_current = ~0;
 
-// gr_draw is owned by backends.
+// Drawing target. Normally this is gr_shadow rather than the backend's buffer;
+// see gr_init().
 static GRSurface* gr_draw = nullptr;
+// The backend buffer gr_shadow is copied into on the next flip, and a shadow of
+// it in ordinary memory.
+static GRSurface* gr_backend_surface = nullptr;
+static std::unique_ptr<GRSurface> gr_shadow = nullptr;
+// Framebuffer rows written since the last flip, as a half-open span; only these
+// are pushed to the backend buffer. Tracked per row because the copy is one
+// memcpy over whole rows anyway.
+static int dirty_top = 0;
+static int dirty_bottom = 0;
+static int prev_dirty_top = 0;
+static int prev_dirty_bottom = 0;
 static GRRotation rotation = GRRotation::NONE;
 static GRRotation touch_rotation = GRRotation::NONE;
 static PixelFormat pixel_format = PixelFormat::UNKNOWN;
@@ -189,6 +201,41 @@ static uint32_t* PixelAt(GRSurface* surface, int x, int y, int row_pixels) {
   return nullptr;
 }
 
+static void MarkDirtyRows(int top, int bottom) {
+  if (!gr_shadow) return;
+  if (top < 0) top = 0;
+  if (bottom > static_cast<int>(gr_draw->height)) bottom = gr_draw->height;
+  if (top >= bottom) return;
+  if (dirty_bottom <= dirty_top) {
+    dirty_top = top;
+    dirty_bottom = bottom;
+    return;
+  }
+  if (top < dirty_top) dirty_top = top;
+  if (bottom > dirty_bottom) dirty_bottom = bottom;
+}
+
+// Maps a rectangle in drawing coordinates to the framebuffer rows it lands on
+// under the current rotation, and marks those dirty. x2 and y2 are exclusive.
+static void MarkDirty(int x1, int y1, int x2, int y2) {
+  if (!gr_shadow) return;
+  int h = gr_draw->height;
+  switch (rotation) {
+    case GRRotation::NONE:
+      MarkDirtyRows(y1, y2);
+      break;
+    case GRRotation::DOWN:
+      MarkDirtyRows(h - y2, h - y1);
+      break;
+    case GRRotation::RIGHT:
+      MarkDirtyRows(x1, x2);
+      break;
+    case GRRotation::LEFT:
+      MarkDirtyRows(h - x2, h - x1);
+      break;
+  }
+}
+
 static void TextBlend(const uint8_t* src_p, int src_row_bytes, uint32_t* dst_p, int dst_row_pixels,
                       int width, int height) {
   uint8_t alpha_current = get_alpha(gr_current);
@@ -198,7 +245,10 @@ static void TextBlend(const uint8_t* src_p, int src_row_bytes, uint32_t* dst_p, 
     for (int i = 0; i < width; ++i, incr_x(&px, dst_row_pixels)) {
       uint8_t a = *sx++;
       if (alpha_current < 255) a = (static_cast<uint32_t>(a) * alpha_current) / 255;
-      *px = pixel_blend(a, *px);
+      // Most of a glyph's box contributes nothing; blending it would read the
+      // destination back only to store the same value.
+      if (a == 0) continue;
+      *px = (a == 255) ? gr_current : pixel_blend(a, *px);
     }
     src_p += src_row_bytes;
     incr_y(&dst_p, dst_row_pixels);
@@ -233,6 +283,7 @@ void gr_text(const GRFont* font, int x, int y, const char* s, bool bold) {
 
     TextBlend(src_p, font->texture->row_bytes, dst_p, row_pixels, font->char_width,
               font->char_height);
+    MarkDirty(x, y, x + font->char_width, y + font->char_height);
 
     x += font->char_width;
   }
@@ -255,6 +306,7 @@ void gr_texticon(int x, int y, const GRSurface* icon) {
   const uint8_t* src_p = icon->data();
   uint32_t* dst_p = PixelAt(gr_draw, x, y, row_pixels);
   TextBlend(src_p, icon->row_bytes, dst_p, row_pixels, icon->width, icon->height);
+  MarkDirty(x, y, x + icon->width, y + icon->height);
 }
 
 void gr_color(unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
@@ -285,6 +337,7 @@ void gr_clear() {
       px += row_diff;
     }
   }
+  MarkDirtyRows(0, gr_draw->height);
 }
 
 void gr_fill(int x1, int y1, int x2, int y2) {
@@ -303,11 +356,12 @@ void gr_fill(int x1, int y1, int x2, int y2) {
     for (int y = y1; y < y2; ++y) {
       uint32_t* px = p;
       for (int x = x1; x < x2; ++x) {
-        *px = pixel_blend(alpha, *px);
+        *px = (alpha == 255) ? gr_current : pixel_blend(alpha, *px);
         incr_x(&px, row_pixels);
       }
       incr_y(&p, row_pixels);
     }
+    MarkDirty(x1, y1, x2, y2);
   }
 }
 
@@ -351,6 +405,7 @@ void gr_blit(const GRSurface* source, int sx, int sy, int w, int h, int dx, int 
       dst_p += gr_draw->row_bytes;
     }
   }
+  MarkDirty(dx, dy, dx + w, dy + h);
 }
 
 unsigned int gr_get_width(const GRSurface* surface) {
@@ -391,7 +446,45 @@ int gr_init_font(const char* name, GRFont** dest) {
 }
 
 void gr_flip() {
-  gr_draw = gr_backend->Flip();
+  if (!gr_shadow) {
+    gr_draw = gr_backend->Flip();
+    return;
+  }
+
+  // The buffer about to be filled was last written two flips ago, so it needs
+  // the previous frame's damage as well as this one's.
+  int top = dirty_top;
+  int bottom = dirty_bottom;
+  if (prev_dirty_bottom > prev_dirty_top) {
+    if (bottom <= top) {
+      top = prev_dirty_top;
+      bottom = prev_dirty_bottom;
+    } else {
+      if (prev_dirty_top < top) top = prev_dirty_top;
+      if (prev_dirty_bottom > bottom) bottom = prev_dirty_bottom;
+    }
+  }
+
+  if (gr_backend_surface) {
+    if (bottom > top) {
+      size_t offset = static_cast<size_t>(top) * gr_shadow->row_bytes;
+      memcpy(gr_backend_surface->data() + offset, gr_shadow->data() + offset,
+             static_cast<size_t>(bottom - top) * gr_shadow->row_bytes);
+    }
+    prev_dirty_top = dirty_top;
+    prev_dirty_bottom = dirty_bottom;
+    dirty_top = dirty_bottom = 0;
+  } else {
+    // No buffer was handed back to copy into. Which one comes back is unknown,
+    // and this frame's damage would be dropped two flips from now, so resync
+    // both buffers in full once a flip succeeds again.
+    dirty_top = prev_dirty_top = 0;
+    dirty_bottom = prev_dirty_bottom = gr_shadow->height;
+  }
+
+  // gr_draw stays pointing at the shadow: a failed flip costs a frame rather
+  // than a null dereference on the next draw, and a later flip recovers.
+  gr_backend_surface = gr_backend->Flip();
 }
 
 std::unique_ptr<MinuiBackend> create_backend(GraphicsBackend backend) {
@@ -460,6 +553,24 @@ int gr_init(std::initializer_list<GraphicsBackend> backends) {
 
   gr_backend = minui_backend.release();
 
+  // Compose into ordinary memory instead of straight into the backend buffer.
+  // That buffer is DMA memory mapped write-combine, and every blend reads the
+  // destination back; an uncached read costs far more than the linear copy this
+  // adds per flip, and the cost scales with screen area.
+  gr_backend_surface = gr_draw;
+  gr_shadow = GRSurface::Create(gr_draw->width, gr_draw->height, gr_draw->row_bytes,
+                                gr_draw->pixel_bytes);
+  if (gr_shadow) {
+    memset(gr_shadow->data(), 0, gr_shadow->height * gr_shadow->row_bytes);
+    gr_draw = gr_shadow.get();
+    // Both backend buffers still hold whatever was on screen at handover.
+    dirty_top = prev_dirty_top = 0;
+    dirty_bottom = prev_dirty_bottom = gr_shadow->height;
+  } else {
+    printf("gr_init: failed to allocate shadow framebuffer, drawing into the backend buffer\n");
+    gr_backend_surface = nullptr;
+  }
+
   int overscan_percent = android::base::GetIntProperty("ro.minui.overscan_percent", 0);
   overscan_offset_x = gr_draw->width * overscan_percent / 100;
   overscan_offset_y = gr_draw->height * overscan_percent / 100;
@@ -470,7 +581,7 @@ int gr_init(std::initializer_list<GraphicsBackend> backends) {
   if (!no_initial_modset_flush) {
     gr_flip();
     gr_flip();
-    if (!gr_draw) {
+    if (!gr_draw || (gr_shadow && !gr_backend_surface)) {
       printf("gr_init: gr_draw becomes nullptr after gr_flip\n");
       return -1;
     }
@@ -510,6 +621,11 @@ int gr_init(std::initializer_list<GraphicsBackend> backends) {
 void gr_exit() {
   delete gr_backend;
   gr_backend = nullptr;
+
+  gr_shadow.reset();
+  gr_backend_surface = nullptr;
+  gr_draw = nullptr;
+  dirty_top = dirty_bottom = prev_dirty_top = prev_dirty_bottom = 0;
 
   delete gr_font;
   gr_font = nullptr;
