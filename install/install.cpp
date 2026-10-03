@@ -314,11 +314,11 @@ bool SetUpAbUpdateCommands(const std::string& package, ZipArchiveHandle zip, int
     LOG(ERROR) << "Failed to find " << AB_OTA_PAYLOAD;
     return false;
   }
-  long payload_offset = payload_entry.offset;
+  uint64_t payload_offset = payload_entry.offset;
   *cmd = {
     "/system/bin/update_engine_sideload",
     "--payload=file://" + package,
-    android::base::StringPrintf("--offset=%ld", payload_offset),
+    android::base::StringPrintf("--offset=%" PRIu64, payload_offset),
     "--headers=" + std::string(payload_properties.begin(), payload_properties.end()),
     android::base::StringPrintf("--status_fd=%d", status_fd),
   };
