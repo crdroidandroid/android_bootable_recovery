@@ -146,10 +146,10 @@ bool WipeData(Device* device, bool keep_memtag_mode, std::string_view data_fstyp
     success &= EraseVolume(DATA_ROOT, ui, data_fstype);
     bool has_cache = volume_for_mount_point("/cache") != nullptr;
     if (has_cache) {
-      success &= EraseVolume(CACHE_ROOT, ui, data_fstype);
+      success &= EraseVolume(CACHE_ROOT, ui, "");
     }
     if (volume_for_mount_point(METADATA_ROOT) != nullptr) {
-      success &= EraseVolume(METADATA_ROOT, ui, data_fstype);
+      success &= EraseVolume(METADATA_ROOT, ui, "");
     }
   }
   if (keep_memtag_mode) {
