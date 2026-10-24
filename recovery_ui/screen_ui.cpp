@@ -30,7 +30,10 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <thread>
@@ -65,6 +68,66 @@ static double now() {
   return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
 
+namespace {
+
+// ---------------------------------------------------------------------------------------------
+// Material-style tonal palette (dark theme on an AMOLED-black background).
+// Everything except the neutrals is derived from the accent, so a device only has to set
+// ro.recovery.ui.accent_color / ro.recovery.ui.fastbootd_accent_color to re-theme recovery.
+// ---------------------------------------------------------------------------------------------
+struct Rgb {
+  uint8_t r, g, b;
+};
+
+constexpr uint32_t kDefaultRecoveryAccent = 0xFE2712;
+constexpr uint32_t kDefaultFastbootdAccent = 0xE65100;
+
+constexpr Rgb kBlack{ 0x00, 0x00, 0x00 };
+constexpr Rgb kWhite{ 0xFF, 0xFF, 0xFF };
+constexpr Rgb kSurfaceContainer{ 0x24, 0x22, 0x28 };  // card / list item container
+constexpr Rgb kOnSurface{ 0xE6, 0xE1, 0xE5 };         // primary text
+constexpr Rgb kOnSurfaceVariant{ 0xCA, 0xC4, 0xD0 };  // secondary text (title, help)
+constexpr Rgb kLogText{ 0xB4, 0xAE, 0xB9 };           // log buffer
+constexpr Rgb kOnLightAccent{ 0x1C, 0x1B, 0x1F };     // text on a light accent
+constexpr Rgb kError{ 0xF2, 0xB8, 0xB5 };             // M3 dark "error"
+
+// Shape & layout tokens (dp).
+constexpr int kMenuHorizontalMarginDp = 16;
+constexpr int kCornerRadiusLargeDp = 20;  // outer corners of a group, selected item
+constexpr int kCornerRadiusSmallDp = 4;   // inner corners between grouped items
+constexpr int kScrollBarWidthDp = 4;
+
+constexpr Rgb FromHex(uint32_t c) {
+  return { static_cast<uint8_t>((c >> 16) & 0xFF), static_cast<uint8_t>((c >> 8) & 0xFF),
+           static_cast<uint8_t>(c & 0xFF) };
+}
+
+// Linear blend: t = 0 returns |a|, t = 1 returns |b|.
+Rgb Mix(const Rgb& a, const Rgb& b, float t) {
+  auto lerp = [t](uint8_t from, uint8_t to) {
+    const long v = std::lround(from + (static_cast<int>(to) - static_cast<int>(from)) * t);
+    return static_cast<uint8_t>(std::clamp(v, 0L, 255L));
+  };
+  return { lerp(a.r, b.r), lerp(a.g, b.g), lerp(a.b, b.b) };
+}
+
+bool IsLight(const Rgb& c) {
+  return (299 * c.r + 587 * c.g + 114 * c.b) / 1000 > 150;
+}
+
+// Reads "#RRGGBB" / "RRGGBB" from |prop|, falling back to |fallback| when unset or malformed.
+uint32_t ReadColorProperty(const std::string& prop, uint32_t fallback) {
+  std::string value = android::base::GetProperty(prop, "");
+  if (!value.empty() && value[0] == '#') value.erase(0, 1);
+  if (value.size() != 6 ||
+      !std::all_of(value.begin(), value.end(), [](unsigned char ch) { return isxdigit(ch); })) {
+    return fallback;
+  }
+  return static_cast<uint32_t>(std::strtoul(value.c_str(), nullptr, 16));
+}
+
+}  // namespace
+
 Menu::Menu(size_t initial_selection, const DrawInterface& draw_func)
     : selection_(initial_selection), draw_funcs_(draw_func) {}
 
@@ -78,8 +141,10 @@ TextMenu::TextMenu(bool wrappable, size_t max_length,
     : Menu(initial_selection, draw_funcs),
       wrappable_(wrappable),
       calibrated_height_(false),
+      max_display_items_(items.size()),
       max_item_length_(max_length),
       text_headers_(headers),
+      menu_start_(0),
       char_height_(char_height) {
 
   size_t items_count = items.size();
@@ -183,39 +248,43 @@ int TextMenu::DrawHeader(int x, int y) const {
   return offset;
 }
 
-int TextMenu::DrawItems(int /*x*/, int y, int screen_width, bool long_press) const {
-  int horizontal_rule_height = 8;
-  int offset = 0;
-  int padding = draw_funcs_.MenuItemPadding();
-  int spacing = draw_funcs_.MenuItemSpacing();
+// Draws the visible items as one segmented group: every row is its own card separated by a thin
+// gap, the group's outer corners use the large radius and the inner corners the small radius.
+// The selected row morphs to the large radius on all corners.
+int TextMenu::DrawItems(int x, int y, int width, bool long_press) const {
+  const int padding = draw_funcs_.MenuItemPadding();
+  const int spacing = draw_funcs_.MenuItemSpacing();
+  const int item_height = padding + char_height_ + padding;
+  const int text_x = x + padding;
 
-  draw_funcs_.SetColor(UIElement::MENU);
-  offset += horizontal_rule_height + 4;
-
-  int item_container_offset = offset; // store it for drawing scrollbar on most top
+  int offset = draw_funcs_.MenuItemsTopGap();
+  const int item_container_offset = offset;  // top of the first item, used for the scrollbar
 
   for (size_t i = MenuStart(); i < MenuEnd(); ++i) {
-    const auto selected = i == selection();
+    if (i != MenuStart()) offset += spacing;
 
-    // Draw the highlight bar.
-    draw_funcs_.SetColor(long_press ? UIElement::MENU_SEL_BG_ACTIVE
-                         : selected ? UIElement::MENU_SEL_BG
-                                    : UIElement::MENU_BG);
+    const bool selected = static_cast<int>(i) == selection();
+    const bool first = i == MenuStart();
+    const bool last = i + 1 == MenuEnd();
 
-    int bar_height = padding + char_height_ + padding;
-    draw_funcs_.DrawHighlightBar(padding, y + offset, screen_width - (padding * 2), bar_height);
+    draw_funcs_.SetColor(selected ? (long_press ? UIElement::MENU_SEL_BG_ACTIVE
+                                                : UIElement::MENU_SEL_BG)
+                                  : UIElement::MENU_BG);
+    draw_funcs_.DrawHighlightBar(x, y + offset, width, item_height, selected || first,
+                                 selected || last);
 
     draw_funcs_.SetColor(selected ? UIElement::MENU_SEL_FG : UIElement::MENU);
-    offset += draw_funcs_.DrawTextLine(padding * 2, y + offset, TextItem(i), false /* bold */);
-    offset += spacing;
+    draw_funcs_.DrawTextLine(text_x, y + offset, TextItem(i), false /* bold */);
+    offset += item_height;
   }
-  offset += horizontal_rule_height;
 
   std::string unused;
   if (ItemsOverflow(&unused)) {
-    int container_height = max_display_items_ * (2 * padding + char_height_ + spacing);
-    int bar_height = container_height / (text_items_.size() - max_display_items_ + 1);
-    int start_y = y + item_container_offset + bar_height * menu_start_;
+    const int visible = static_cast<int>(max_display_items_);
+    const int container_height = visible * (item_height + spacing) - spacing;
+    const int steps = static_cast<int>(ItemsCount() - max_display_items_) + 1;
+    const int bar_height = std::max(1, container_height / steps);
+    const int start_y = y + item_container_offset + bar_height * static_cast<int>(menu_start_);
     draw_funcs_.SetColor(UIElement::SCROLLBAR);
     draw_funcs_.DrawScrollBar(start_y, bar_height);
   }
@@ -259,29 +328,31 @@ int GraphicMenu::DrawHeader(int x, int y) const {
   return graphic_headers_->height;
 }
 
-int GraphicMenu::DrawItems(int x, int y, int screen_width, bool long_press) const {
-  int offset = 0;
+int GraphicMenu::DrawItems(int x, int y, int width, bool long_press) const {
+  const int padding = draw_funcs_.MenuItemPadding();
+  const int spacing = draw_funcs_.MenuItemSpacing();
+  const int text_x = x + padding;
+  const size_t count = graphic_items_.size();
 
-  draw_funcs_.SetColor(UIElement::MENU);
-  offset += draw_funcs_.DrawHorizontalRule(y + offset) + 4;
+  int offset = draw_funcs_.MenuItemsTopGap();
 
-  for (size_t i = 0; i < graphic_items_.size(); i++) {
+  for (size_t i = 0; i < count; i++) {
+    if (i != 0) offset += spacing;
+
     auto& item = graphic_items_[i];
-    if (i == selection_) {
-      draw_funcs_.SetColor(long_press ? UIElement::MENU_SEL_BG_ACTIVE : UIElement::MENU_SEL_BG);
+    const bool selected = static_cast<int>(i) == selection_;
+    const int item_height = item->height + padding;
 
-      int bar_height = item->height + 4;
-      draw_funcs_.DrawHighlightBar(0, y + offset - 2, screen_width, bar_height);
+    draw_funcs_.SetColor(selected ? (long_press ? UIElement::MENU_SEL_BG_ACTIVE
+                                                : UIElement::MENU_SEL_BG)
+                                  : UIElement::MENU_BG);
+    draw_funcs_.DrawHighlightBar(x, y + offset, width, item_height, selected || i == 0,
+                                 selected || i + 1 == count);
 
-      // Bold white text for the selected item.
-      draw_funcs_.SetColor(UIElement::MENU_SEL_FG);
-    }
-    draw_funcs_.DrawTextIcon(x, y + offset, item.get());
-    offset += item->height;
-
-    draw_funcs_.SetColor(UIElement::MENU);
+    draw_funcs_.SetColor(selected ? UIElement::MENU_SEL_FG : UIElement::MENU);
+    draw_funcs_.DrawTextIcon(text_x, y + offset + padding / 2, item.get());
+    offset += item_height;
   }
-  offset += draw_funcs_.DrawHorizontalRule(y + offset);
 
   return offset;
 }
@@ -396,6 +467,9 @@ ScreenRecoveryUI::ScreenRecoveryUI()
       density_(static_cast<float>(android::base::GetIntProperty("ro.sf.lcd_density", 160)) / 160.f),
       blank_unblank_on_init_(
           android::base::GetBoolProperty("ro.recovery.ui.blank_unblank_on_init", false)),
+      recovery_accent_(ReadColorProperty("ro.recovery.ui.accent_color", kDefaultRecoveryAccent)),
+      fastbootd_accent_(
+          ReadColorProperty("ro.recovery.ui.fastbootd_accent_color", kDefaultFastbootdAccent)),
       current_icon_(NONE),
       current_frame_(0),
       intro_done_(false),
@@ -459,6 +533,10 @@ const GRSurface* ScreenRecoveryUI::GetCurrentText() const {
 
 int ScreenRecoveryUI::PixelsFromDp(int dp) const {
   return dp * density_;
+}
+
+int ScreenRecoveryUI::MenuHorizontalMargin() const {
+  return PixelsFromDp(kMenuHorizontalMarginDp);
 }
 
 // Here's the intended layout:
@@ -582,63 +660,61 @@ void ScreenRecoveryUI::draw_foreground_locked() {
   }
 }
 
-/* recovery dark:  #7C4DFF
-   recovery light: #F890FF
-   fastbootd dark: #E65100
-   fastboot light: #FDD835 */
+void ScreenRecoveryUI::SetDrawColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a) const {
+  draw_color_[0] = r;
+  draw_color_[1] = g;
+  draw_color_[2] = b;
+  draw_color_[3] = a;
+  gr_color(r, g, b, a);
+}
+
+// Palette roles (dark):
+//   MENU_BG            surfaceContainer, lightly tinted with the accent
+//   MENU_SEL_BG        accent (primary)
+//   MENU_SEL_BG_ACTIVE accent + pressed state layer (long-press feedback)
+//   MENU_SEL_FG        onPrimary, picked for contrast against the accent
+//   HEADER/SCROLLBAR   accent at a lighter tone
+//   MENU / INFO / LOG  onSurface / onSurfaceVariant / muted log text
 void ScreenRecoveryUI::SetColor(UIElement e) const {
+  const Rgb accent = FromHex(fastbootd_logo_enabled_ ? fastbootd_accent_ : recovery_accent_);
+  auto apply = [this](const Rgb& c, uint8_t alpha) { SetDrawColor(c.r, c.g, c.b, alpha); };
+
   switch (e) {
     case UIElement::BATTERY_LOW:
-      if (fastbootd_logo_enabled_)
-        gr_color(0xfd, 0x35, 0x35, 255);
-      else
-        gr_color(0xc7, 0x15, 0x85, 255);
+      apply(kError, 255);
       break;
     case UIElement::INFO:
-      if (fastbootd_logo_enabled_)
-        gr_color(0xfd, 0xd8, 0x35, 255);
-      else
-        gr_color(255, 255, 255, 255);
+      apply(kOnSurfaceVariant, 255);
       break;
     case UIElement::HEADER:
-      if (fastbootd_logo_enabled_)
-        gr_color(0xfd, 0xd8,0x35, 255);
-      else
-        gr_color(254, 39, 18, 255);
+      apply(Mix(accent, kWhite, 0.35f), 255);
       break;
     case UIElement::MENU:
-      gr_color(0xd8, 0xd8, 0xd8, 255);
+      apply(kOnSurface, 255);
       break;
     case UIElement::MENU_BG:
-      if (fastbootd_logo_enabled_)
-        gr_color(0xe6 * 0.20, 0x51 * 0.20, 0x00 * 0.20, 255);
-      else
-        gr_color(254 * 0.20, 39 * 0.20, 18 * 0.20, 255);
+      apply(Mix(kSurfaceContainer, accent, 0.08f), 255);
       break;
     case UIElement::MENU_SEL_BG:
-    case UIElement::SCROLLBAR:
-      if (fastbootd_logo_enabled_)
-        gr_color(0xe6, 0x51, 0x00, 255);
-      else
-        gr_color(254, 39, 18, 255);
+      apply(accent, 255);
       break;
     case UIElement::MENU_SEL_BG_ACTIVE:
-      gr_color(254, 39, 18, 255);
+      apply(Mix(accent, kWhite, 0.24f), 255);
       break;
     case UIElement::MENU_SEL_FG:
-      if (fastbootd_logo_enabled_)
-        gr_color(0, 0, 0, 255);
-      else
-        gr_color(0xd8, 0xd8, 0xd8, 255);
+      apply(IsLight(accent) ? kOnLightAccent : kWhite, 255);
+      break;
+    case UIElement::SCROLLBAR:
+      apply(Mix(accent, kWhite, 0.35f), 255);
       break;
     case UIElement::LOG:
-      gr_color(196, 196, 196, 255);
+      apply(kLogText, 255);
       break;
     case UIElement::TEXT_FILL:
-      gr_color(0, 0, 0, 160);
+      apply(kBlack, 160);
       break;
     default:
-      gr_color(255, 255, 255, 255);
+      apply(kWhite, 255);
       break;
   }
 }
@@ -743,16 +819,118 @@ int ScreenRecoveryUI::DrawHorizontalRule(int y) const {
   return 8;
 }
 
+// Scanline rasterizer for a rectangle with circular top/bottom corners. Interior spans are filled
+// with the current color in one gr_fill() per row; only the pixels the curve actually crosses are
+// blended individually, with alpha proportional to their coverage. Clipping is done against the
+// whole framebuffer because minui's gr_fill() drops rectangles that are partly off-screen.
+void ScreenRecoveryUI::DrawRoundedRect(int x, int y, int width, int height, int radius_top,
+                                       int radius_bottom) const {
+  if (width <= 0 || height <= 0) return;
+
+  const int max_radius = std::min(width, height) / 2;
+  radius_top = std::clamp(radius_top, 0, max_radius);
+  radius_bottom = std::clamp(radius_bottom, 0, max_radius);
+
+  const int fb_width = gr_fb_width();
+  const int fb_height = gr_fb_height();
+  const uint8_t r = draw_color_[0];
+  const uint8_t g = draw_color_[1];
+  const uint8_t b = draw_color_[2];
+  const uint8_t a = draw_color_[3];
+  bool color_changed = false;
+
+  auto fill = [&](int x1, int y1, int x2, int y2) {
+    x1 = std::max(x1, 0);
+    y1 = std::max(y1, 0);
+    x2 = std::min(x2, fb_width);
+    y2 = std::min(y2, fb_height);
+    if (x2 <= x1 || y2 <= y1) return;
+    if (color_changed) {
+      // An edge pixel was blended with partial alpha; restore the solid color first.
+      gr_color(r, g, b, a);
+      color_changed = false;
+    }
+    gr_fill(x1, y1, x2, y2);
+  };
+
+  auto blend = [&](int px, int row, double coverage) {
+    if (px < 0 || px >= fb_width || coverage <= 0.0) return;
+    const int alpha = static_cast<int>(std::lround(a * std::min(coverage, 1.0)));
+    if (alpha <= 0) return;
+    gr_color(r, g, b, static_cast<uint8_t>(alpha));
+    gr_fill(px, row, px + 1, row + 1);
+    color_changed = true;
+  };
+
+  // Coverage of a pixel whose center is (dx, dy) away from the corner circle's center.
+  auto coverage = [](double dx, double dy, int radius) {
+    const double d = std::sqrt(std::max(0.0, dx) * std::max(0.0, dx) + dy * dy);
+    return std::clamp(radius + 0.5 - d, 0.0, 1.0);
+  };
+
+  auto draw_corner_row = [&](int row, int radius, double dy) {
+    if (row < 0 || row >= fb_height) return;
+
+    const double cx_left = x + radius;
+    const double cx_right = x + width - radius;
+    const double r_in = radius - 0.5;
+    const double r_out = radius + 0.5;
+    const double dx_in = std::sqrt(std::max(0.0, r_in * r_in - dy * dy));
+    const double dx_out = std::sqrt(std::max(0.0, r_out * r_out - dy * dy));
+    const int mid = x + width / 2;
+
+    // Fully covered span.
+    const int solid_left = std::max(x, static_cast<int>(std::ceil(cx_left - dx_in - 0.5)));
+    const int solid_right =
+        std::min(x + width, static_cast<int>(std::floor(cx_right + dx_in - 0.5)) + 1);
+    if (solid_right > solid_left) fill(solid_left, row, solid_right, row + 1);
+
+    // Anti-aliased edge pixels. When there is no solid span (pill ends), split at |mid| so no
+    // pixel is blended twice.
+    const int left_begin =
+        std::max(x, static_cast<int>(std::floor(cx_left - dx_out - 0.5)) + 1);
+    const int left_end = std::min(solid_left, mid);
+    for (int px = left_begin; px < left_end; ++px) {
+      blend(px, row, coverage(cx_left - (px + 0.5), dy, radius));
+    }
+
+    const int right_begin = std::max(solid_right, mid);
+    const int right_end =
+        std::min(x + width, static_cast<int>(std::ceil(cx_right + dx_out - 0.5)));
+    for (int px = right_begin; px < right_end; ++px) {
+      blend(px, row, coverage((px + 0.5) - cx_right, dy, radius));
+    }
+  };
+
+  // Straight middle section in a single call.
+  fill(x, y + radius_top, x + width, y + height - radius_bottom);
+
+  for (int i = 0; i < radius_top; ++i) {
+    draw_corner_row(y + i, radius_top, radius_top - (i + 0.5));
+  }
+  for (int i = 0; i < radius_bottom; ++i) {
+    draw_corner_row(y + height - radius_bottom + i, radius_bottom, i + 0.5);
+  }
+
+  if (color_changed) gr_color(r, g, b, a);
+}
+
 void ScreenRecoveryUI::DrawHighlightBar(int x, int y, int width, int height) const {
-  if (y + height > ScreenHeight())
-    height = ScreenHeight() - y;
-  gr_fill(x, y, x + width, y + height);
+  DrawHighlightBar(x, y, width, height, true, true);
+}
+
+void ScreenRecoveryUI::DrawHighlightBar(int x, int y, int width, int height, bool round_top,
+                                        bool round_bottom) const {
+  const int large = PixelsFromDp(kCornerRadiusLargeDp);
+  const int small = PixelsFromDp(kCornerRadiusSmallDp);
+  DrawRoundedRect(x, y, width, height, round_top ? large : small, round_bottom ? large : small);
 }
 
 void ScreenRecoveryUI::DrawScrollBar(int y, int height) const {
-  int x = ScreenWidth() - margin_width_;
-  int width = 8;
-  gr_fill(x - width, y, x, y + height);
+  // Pill-shaped thumb centered in the right-hand gutter next to the cards.
+  const int width = std::max(2, PixelsFromDp(kScrollBarWidthDp));
+  const int x = ScreenWidth() - margin_width_ - MenuHorizontalMargin() / 2 - width / 2;
+  DrawRoundedRect(x, y, width, height, width / 2, width / 2);
 }
 
 void ScreenRecoveryUI::DrawFill(int x, int y, int w, int h) const {
@@ -862,20 +1040,34 @@ void ScreenRecoveryUI::draw_menu_and_text_buffer_locked(
               0, 0, icon_w, icon_h, icon_x, icon_y);
     }
 
-    int x = margin_width_ + kMenuIndent;
+    // Cards span the screen minus the margin and gutter; text everywhere aligns with the text
+    // inside the cards.
+    const int card_x = margin_width_ + MenuHorizontalMargin();
+    const int card_width = std::max(0, ScreenWidth() - 2 * card_x);
+    const int content_x = card_x + MenuItemPadding();
+
     if (!title_lines_.empty()) {
       SetColor(UIElement::INFO);
-      y += DrawTextLines(x, y, title_lines_);
+      y += DrawTextLines(content_x, y, title_lines_);
     }
-    y += menu_->DrawHeader(x, y);
-    menu_start_y_ = y + 12; // Skip horizontal rule and some margin
-    menu_->SetMenuHeight(std::max(0, ScreenHeight() - menu_start_y_));
-    y += menu_->DrawItems(x, y, ScreenWidth(), IsLongPress());
+    y += menu_->DrawHeader(content_x, y);
+
+    // Must match the lead-in used by Menu::DrawItems() for touch hit-testing.
+    menu_start_y_ = y + MenuItemsTopGap();
+
+    // Leave room for the help text so it never gets pushed off-screen.
+    int reserved = 0;
     if (!help_message.empty()) {
-      y -= MenuItemSpacing();
-      y += 12; // Skip horizontal rule and some margin
+      reserved = MenuItemsTopGap() + static_cast<int>(help_message.size()) * (char_height_ + 4);
+    }
+    menu_->SetMenuHeight(std::max(0, ScreenHeight() - margin_height_ - menu_start_y_ - reserved));
+
+    y += menu_->DrawItems(card_x, y, card_width, IsLongPress());
+
+    if (!help_message.empty()) {
+      y += MenuItemsTopGap();
       SetColor(UIElement::INFO);
-      y += DrawTextLines(x, y, help_message);
+      y += DrawTextLines(content_x, y, help_message);
     }
   }
 
@@ -909,8 +1101,8 @@ void ScreenRecoveryUI::draw_battery_capacity_locked() {
     batt_capacity.pop_back();
 
   if (menu_) {
-    // Battery icon
-    x = (ScreenWidth() - margin_width_ * 2 - kMenuIndent) - char_width_;
+    // Battery icon, right-aligned with the menu cards.
+    x = ScreenWidth() - margin_width_ - MenuHorizontalMargin() - char_width_;
 
     SetColor(UIElement::INFO);
 
@@ -1476,8 +1668,10 @@ std::unique_ptr<Menu> ScreenRecoveryUI::CreateMenu(
     const GRSurface* graphic_header, const std::vector<const GRSurface*>& graphic_items,
     const std::vector<std::string>& text_headers, const std::vector<std::string>& text_items,
     size_t initial_selection) const {
-  // horizontal unusable area: margin width + menu indent
-  size_t max_width = ScreenWidth() - margin_width_ - kMenuIndent;
+  // horizontal unusable area: margin width + card gutter + text inset, on both sides
+  const int content_width =
+      ScreenWidth() - 2 * (margin_width_ + MenuHorizontalMargin() + MenuItemPadding());
+  size_t max_width = static_cast<size_t>(std::max(0, content_width));
   // vertical unusable area: margin height + title lines + helper message + high light bar.
   // It is safe to reserve more space.
   size_t max_height = ScreenHeight() - margin_height_ - char_height_ * (title_lines_.size() + 3);
@@ -1495,7 +1689,10 @@ std::unique_ptr<Menu> ScreenRecoveryUI::CreateMenu(const std::vector<std::string
                                                    size_t initial_selection) const {
   int menu_char_width = MenuCharWidth();
   int menu_char_height = MenuCharHeight();
-  int menu_cols = (ScreenWidth() - margin_width_*2 - kMenuIndent) / menu_char_width;
+  // Text lives inside the cards, so subtract the gutter and the text inset on both sides.
+  int content_width =
+      ScreenWidth() - 2 * (margin_width_ + MenuHorizontalMargin() + MenuItemPadding());
+  int menu_cols = std::max(1, content_width / menu_char_width);
   bool wrap_selection = !HasThreeButtons() && !HasTouchScreen();
   return std::make_unique<TextMenu>(wrap_selection, menu_cols, text_headers, text_items,
                                     initial_selection, menu_char_height, *menu_draw_funcs_);

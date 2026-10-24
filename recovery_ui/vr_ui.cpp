@@ -59,11 +59,12 @@ int VrRecoveryUI::DrawHorizontalRule(int y) const {
   return y + 4;
 }
 
-void VrRecoveryUI::DrawHighlightBar(int /* x */, int y, int /* width */, int height) const {
-  gr_fill(margin_width_ + stereo_offset_, y, ScreenWidth() - margin_width_ + stereo_offset_,
-          y + height);
-  gr_fill(ScreenWidth() + margin_width_ - stereo_offset_, y,
-          gr_fb_width() - margin_width_ - stereo_offset_, y + height);
+void VrRecoveryUI::DrawRoundedRect(int x, int y, int width, int height, int radius_top,
+                                   int radius_bottom) const {
+  ScreenRecoveryUI::DrawRoundedRect(x + stereo_offset_, y, width, height, radius_top,
+                                    radius_bottom);
+  ScreenRecoveryUI::DrawRoundedRect(x - stereo_offset_ + ScreenWidth(), y, width, height,
+                                    radius_top, radius_bottom);
 }
 
 void VrRecoveryUI::DrawFill(int x, int y, int w, int h) const {
