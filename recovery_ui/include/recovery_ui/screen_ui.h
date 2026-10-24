@@ -19,7 +19,9 @@
 
 #include <stdio.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -56,6 +58,14 @@ class DrawInterface {
   // Draws a highlight bar at (x, y) - (x + width, y + height).
   virtual void DrawHighlightBar(int x, int y, int width, int height) const = 0;
 
+  // Same bar, but with shaped corners so adjacent rows read as one segmented group:
+  // |round_top| / |round_bottom| select the large (outer) radius for that edge, otherwise the
+  // small (inner) radius is used. Implementations without shape support draw a plain bar.
+  virtual void DrawHighlightBar(int x, int y, int width, int height, bool /* round_top */,
+                                bool /* round_bottom */) const {
+    DrawHighlightBar(x, y, width, height);
+  }
+
   // Draws a horizontal rule at Y. Returns the offset it should be moving along Y-axis.
   virtual int DrawHorizontalRule(int y) const = 0;
 
@@ -88,6 +98,12 @@ class DrawInterface {
   virtual int MenuItemPadding() const = 0;
   virtual int MenuItemSpacing() const = 0;
   virtual int MenuItemHeight() const = 0;
+
+  // Vertical gap between the menu header and the first item (and between the last item and the
+  // help text). Touch hit-testing relies on this, so menus and the screen must agree on it.
+  virtual int MenuItemsTopGap() const {
+    return MenuItemSpacing() * 4;
+  }
 };
 
 // Interface for classes that maintain the menu selection and display.
@@ -106,8 +122,9 @@ class Menu {
   virtual int Scroll(int updown) = 0;
   // Displays the menu headers on the screen at offset x, y
   virtual int DrawHeader(int x, int y) const = 0;
-  // Iterates over the menu items and displays each of them at offset x, y.
-  virtual int DrawItems(int x, int y, int screen_width, bool long_press) const = 0;
+  // Iterates over the menu items and displays each of them. |x| and |width| give the horizontal
+  // extent of the item cards; text is inset inside them. Returns the height consumed.
+  virtual int DrawItems(int x, int y, int width, bool long_press) const = 0;
   virtual size_t ItemsCount() const = 0;
   virtual bool IsMain() const = 0;
   virtual void SetMenuHeight(int height) = 0;
@@ -133,7 +150,7 @@ class TextMenu : public Menu {
   int SelectVisible(int relative_sel) override;
   int Scroll(int updown) override;
   int DrawHeader(int x, int y) const override;
-  int DrawItems(int x, int y, int screen_width, bool long_press) const override;
+  int DrawItems(int x, int y, int width, bool long_press) const override;
   size_t ItemsCount() const override;
 
   bool IsMain() const override {
@@ -169,11 +186,15 @@ class TextMenu : public Menu {
   // |cur_selection_str| if the items exceed the screen limit.
   bool ItemsOverflow(std::string* cur_selection_str) const;
 
-  // The number of displayable items is only known after we started drawing the menu (to consider logo, header, etc.)
-  // Make it settable after the menu is created
-  void SetMenuHeight(int height) {
+  // The number of displayable items is only known after we started drawing the menu (to consider
+  // logo, header, etc.). Make it settable after the menu is created.
+  void SetMenuHeight(int height) override {
     if (!calibrated_height_) {
-      max_display_items_ = height / draw_funcs_.MenuItemHeight();
+      // N items occupy N * item_height + (N - 1) * spacing.
+      const int spacing = draw_funcs_.MenuItemSpacing();
+      const int item_extent = std::max(1, draw_funcs_.MenuItemHeight() + spacing);
+      max_display_items_ =
+          static_cast<size_t>(std::max(1, (std::max(0, height) + spacing) / item_extent));
       menu_start_ = std::max(0, (int)selection_ - (int)max_display_items_ + 1);
       calibrated_height_ = true;
     }
@@ -216,7 +237,7 @@ class GraphicMenu : public Menu {
     return selection_;
   };
   int DrawHeader(int x, int y) const override;
-  int DrawItems(int x, int y, int screen_width, bool long_press) const override;
+  int DrawItems(int x, int y, int width, bool long_press) const override;
   size_t ItemsCount() const override;
   bool IsMain() const override {
     return true;
@@ -247,6 +268,10 @@ class MenuDrawFunctions : public DrawInterface {
   void DrawHighlightBar(int x, int y, int width, int height) const override {
     wrappee_.DrawHighlightBar(x, y, width, height);
   };
+  void DrawHighlightBar(int x, int y, int width, int height, bool round_top,
+                        bool round_bottom) const override {
+    wrappee_.DrawHighlightBar(x, y, width, height, round_top, round_bottom);
+  }
   void DrawScrollBar(int y, int height) const override {
     wrappee_.DrawScrollBar(y, height);
   }
@@ -278,6 +303,9 @@ class MenuDrawFunctions : public DrawInterface {
   int MenuItemHeight() const override {
     return wrappee_.MenuItemHeight();
   };
+  int MenuItemsTopGap() const override {
+    return wrappee_.MenuItemsTopGap();
+  }
   int DrawTextLine(int x, int y, const std::string& line, bool bold) const override;
   int DrawTextLines(int x, int y, const std::vector<std::string>& lines) const override;
   int DrawWrappedTextLines(int x, int y, const std::vector<std::string>& lines) const override;
@@ -348,8 +376,10 @@ class ScreenRecoveryUI : public RecoveryUI, public DrawInterface {
     return MenuCharHeight() + 2 * MenuItemPadding();
   }
 
+  // Thin gap between segmented items (Material 3 grouped list).
   int MenuItemSpacing() const override {
-    return 8;
+    const int spacing = PixelsFromDp(2);
+    return spacing > 2 ? spacing : 2;
   }
 
  protected:
@@ -368,6 +398,11 @@ class ScreenRecoveryUI : public RecoveryUI, public DrawInterface {
 
   // Whether we should blank and unblank screen on init to workaround device specific issues
   bool blank_unblank_on_init_;
+
+  // Accent (primary) colors as 0xRRGGBB. Overridable with ro.recovery.ui.accent_color and
+  // ro.recovery.ui.fastbootd_accent_color ("#RRGGBB"); the rest of the palette derives from them.
+  const uint32_t recovery_accent_;
+  const uint32_t fastbootd_accent_;
 
   virtual bool InitTextParams();
 
@@ -435,9 +470,23 @@ class ScreenRecoveryUI : public RecoveryUI, public DrawInterface {
   // Returns pixel height of draw buffer.
   virtual int ScreenHeight() const;
 
+  // Horizontal gutter between the screen margin and the menu cards.
+  int MenuHorizontalMargin() const;
+
+  // Fills (x, y, width, height) with anti-aliased rounded corners using the color last set via
+  // SetColor(). Top corners use |radius_top|, bottom corners |radius_bottom|. Virtual so that
+  // stereo UIs can draw it once per eye.
+  virtual void DrawRoundedRect(int x, int y, int width, int height, int radius_top,
+                               int radius_bottom) const;
+
+  // Sets the minui draw color and remembers it, so edge pixels can be blended with partial alpha.
+  void SetDrawColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a) const;
+
   // Implementation of the draw functions in DrawInterface.
   void SetColor(UIElement e) const override;
   void DrawHighlightBar(int x, int y, int width, int height) const override;
+  void DrawHighlightBar(int x, int y, int width, int height, bool round_top,
+                        bool round_bottom) const override;
   void DrawScrollBar(int y, int height) const override;
   int DrawHorizontalRule(int y) const override;
   void DrawSurface(const GRSurface* surface, int sx, int sy, int w, int h, int dx,
@@ -549,6 +598,9 @@ class ScreenRecoveryUI : public RecoveryUI, public DrawInterface {
   bool is_graphics_available;
 
   bool is_battery_less;
+
+  // Last color applied through SetDrawColor() (RGBA).
+  mutable uint8_t draw_color_[4] = { 255, 255, 255, 255 };
 
  private:
   void SetLocale(const std::string&);
