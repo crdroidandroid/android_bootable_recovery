@@ -1749,7 +1749,7 @@ int ScreenRecoveryUI::SelectMenu(const Point& p) {
       const static int icon_w = gr_get_width(back_icon_.get());
       const static int icon_h = gr_get_height(back_icon_.get());
       const static int centered_x = ScreenWidth() / 2 - logo_width / 2;
-      const static int icon_x = centered_x / 2 - icon_w / 2;
+      const static int icon_x = (centered_x - margin_width_) / 2 - icon_w / 2 + margin_width_;
       const static int icon_y = margin_height_ + logo_height / 2 - icon_h / 2;
 
       if (point.x() >= icon_x && point.x() <= icon_x + icon_w &&
