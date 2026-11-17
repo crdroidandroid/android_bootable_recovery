@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <sys/mount.h>
 
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -131,14 +132,58 @@ Volume* volume_for_mount_point(const std::string& mount_point) {
   return android::fs_mgr::GetEntryForMountPoint(&fstab, mount_point);
 }
 
+bool HasFsTypeFallback(const std::string& volume, const std::string& fs_type) {
+  const auto entries = android::fs_mgr::GetEntriesForMountPoint(&fstab, volume);
+  // Only a fallback if the primary (first) entry uses a different filesystem.
+  if (entries.size() < 2 || entries[0]->fs_type == fs_type) {
+    return false;
+  }
+  return std::any_of(entries.begin() + 1, entries.end(),
+                     [&](const FstabEntry* e) { return e->fs_type == fs_type; });
+}
+
+static FstabEntry* FallbackEntryMatchingDisk(const std::string& path) {
+  const auto entries = android::fs_mgr::GetEntriesForPath(&fstab, path);
+  if (entries.size() < 2) {
+    return nullptr;
+  }
+  for (const auto* entry : entries) {
+    // Block devices of logical partitions are only resolved by fs_mgr while mounting.
+    if (entry->fs_mgr_flags.logical || entry->blk_device.empty() || entry->blk_device[0] != '/') {
+      return nullptr;
+    }
+  }
+
+  char* detected_fs_type = blkid_get_tag_value(nullptr, "TYPE", entries[0]->blk_device.c_str());
+  if (detected_fs_type == nullptr) {
+    return nullptr;
+  }
+  FstabEntry* match = nullptr;
+  for (size_t i = 1; i < entries.size(); ++i) {
+    if (entries[0]->fs_type != detected_fs_type && entries[i]->fs_type == detected_fs_type &&
+        entries[i]->blk_device == entries[0]->blk_device) {
+      match = entries[i];
+      break;
+    }
+  }
+  free(detected_fs_type);
+  return match;
+}
+
 // Mount the volume specified by path at the given mount_point.
 int ensure_path_mounted_at(const std::string& path, const std::string& mount_point) {
+  if (FstabEntry* match = FallbackEntryMatchingDisk(path); match != nullptr) {
+    Fstab matching_fstab{ *match };
+    if (android::fs_mgr::EnsurePathMounted(&matching_fstab, path, mount_point)) {
+      return 0;
+    }
+  }
   return android::fs_mgr::EnsurePathMounted(&fstab, path, mount_point) ? 0 : -1;
 }
 
 int ensure_path_mounted(const std::string& path) {
   // Mount at the default mount point.
-  return android::fs_mgr::EnsurePathMounted(&fstab, path) ? 0 : -1;
+  return ensure_path_mounted_at(path, "");
 }
 
 int ensure_path_unmounted(const std::string& path) {
@@ -268,6 +313,20 @@ int format_volume(const std::string& volume, const std::string& directory,
   if (v == nullptr) {
     LOG(ERROR) << "Unable to find formattable entry for \"" << volume << "\"";
     return -1;
+  }
+
+  FstabEntry requested_entry;
+  if (!new_fstype.empty() && v->fs_type != new_fstype) {
+    auto it = std::find_if(entries.begin(), entries.end(), [&](const FstabEntry* e) {
+      return e->mount_point == volume && e->fs_type == new_fstype;
+    });
+    if (it != entries.end()) {
+      requested_entry = **it;
+      requested_entry.blk_device = v->blk_device;
+      v = &requested_entry;
+      LOG(INFO) << "format_volume: using fstab entry with fs_type \"" << v->fs_type << "\" for "
+                << volume;
+    }
   }
   if (v->fs_type == "ramdisk") {
     LOG(ERROR) << "can't format_volume \"" << volume << "\"";

@@ -28,6 +28,10 @@ void load_volume_table();
 // Return the Volume* record for this mount point (or nullptr).
 Volume* volume_for_mount_point(const std::string& mount_point);
 
+// Returns true if the fstab lists a fallback entry for 'volume' with the given 'fs_type', i.e. the
+// primary (first) entry uses a different filesystem and a later entry uses 'fs_type'.
+bool HasFsTypeFallback(const std::string& volume, const std::string& fs_type);
+
 // Make sure that the volume 'path' is on is mounted.  Returns 0 on
 // success (volume is mounted).
 int ensure_path_mounted(const std::string& path);

@@ -252,9 +252,10 @@ bool ask_to_continue_spl_downgrade(Device* device) {
     "Install anyway?");
 }
 
-static bool ask_to_wipe_data(Device* device) {
-  std::vector<std::string> headers{ "Format user data?", "This includes internal storage.", "THIS CANNOT BE UNDONE!" };
-  std::vector<std::string> items{ " Cancel", " Format data" };
+static bool ask_to_wipe_data(Device* device, bool f2fs = false) {
+  std::vector<std::string> headers{ f2fs ? "Format user data as f2fs?" : "Format user data?",
+                                    "This includes internal storage.", "THIS CANNOT BE UNDONE!" };
+  std::vector<std::string> items{ " Cancel", f2fs ? " Format data as f2fs" : " Format data" };
 
   size_t chosen_item = device->GetUI()->ShowMenu(
       headers, items, 0, true,
@@ -625,12 +626,27 @@ change_menu:
         }
         break;
 
-      case Device::WIPE_CACHE: {
+      case Device::WIPE_DATA_F2FS:
         save_current_log = true;
-        std::function<bool()> confirm_func = [&device]() {
-          return yes_no(device, "Format cache?", "  THIS CAN NOT BE UNDONE!");
+        if (ui->IsTextVisible()) {
+          if (ask_to_wipe_data(device, true)) {
+            WipeData(device, false, "f2fs");
+          }
+        } else {
+          WipeData(device, false, "f2fs");
+          return Device::NO_ACTION;
+        }
+        break;
+
+      case Device::WIPE_CACHE:
+      case Device::WIPE_CACHE_F2FS: {
+        save_current_log = true;
+        bool f2fs = chosen_action == Device::WIPE_CACHE_F2FS;
+        std::function<bool()> confirm_func = [&device, f2fs]() {
+          return yes_no(device, f2fs ? "Format cache as f2fs?" : "Format cache?",
+                        "  THIS CAN NOT BE UNDONE!");
         };
-        WipeCache(ui, ui->IsTextVisible() ? confirm_func : nullptr);
+        WipeCache(ui, ui->IsTextVisible() ? confirm_func : nullptr, f2fs ? "f2fs" : "");
         if (!ui->IsTextVisible()) return Device::NO_ACTION;
         break;
       }

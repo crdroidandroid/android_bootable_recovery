@@ -479,6 +479,16 @@ int main(int argc, char** argv) {
     device->RemoveMenuItemForAction(Device::WIPE_CACHE);
   }
 
+  // Offer formatting as f2fs only where recovery.fstab lists an f2fs fallback entry, make_f2fs is
+  // available and we are in 4K page mode (F2FS does not support page_size != block_size).
+  bool can_format_f2fs = access("/system/bin/make_f2fs", X_OK) == 0 && getpagesize() == 4096;
+  if (!can_format_f2fs || !HasFsTypeFallback("/data", "f2fs")) {
+    device->RemoveMenuItemForAction(Device::WIPE_DATA_F2FS);
+  }
+  if (!can_format_f2fs || !HasCache() || !HasFsTypeFallback("/cache", "f2fs")) {
+    device->RemoveMenuItemForAction(Device::WIPE_CACHE_F2FS);
+  }
+
   if (android::base::GetBoolProperty("ro.build.ab_update", false)) {
     // There's not much point in formatting the active slot's system partition
     // because ROMs are flashed to the inactive slot. Removing the menu option
